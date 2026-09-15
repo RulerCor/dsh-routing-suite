@@ -881,8 +881,13 @@ export function apply(ctx: AppContext, config: Config): void {
 
   async function reloadPackage(match: string, urlMatch?: string): Promise<string> {
     const internal = ctx.loader.internal
-    if (!internal) return 'ERROR: loader.internal 不可用'
-    const loadCache = internal.loadCache as Map<string, any>
+    if (!internal) return 'ERROR: loader.internal 不可用（当前 DSH/Node 未暴露 Node 内部 loader）'
+    // loadCache 未必存在：它是 Node 内部 API，只有 requireInternal() 成功时才挂上。
+    // 用空 Map 顶替 → urls 匹配自然落空 → 走下方"磁盘 lib/index.js 降级"分支，
+    // 该分支只依赖 findEntry + 磁盘探测，不需要 loadCache。
+    const loadCache = internal.loadCache instanceof Map
+      ? internal.loadCache as Map<string, any>
+      : new Map<string, any>()
 
     const urlKey = (urlMatch ?? match).replace(/\\/g, '/')
     let urls = [...loadCache.keys()].filter((u) => {
@@ -1375,8 +1380,15 @@ export function apply(ctx: AppContext, config: Config): void {
       const opts = entry.options
       if (opts.group) continue
       const state = entry.fiber ? (FIBER_NAMES[entry.fiber.state] ?? `state:${entry.fiber.state}`) : 'no-fiber'
-      const entryUrl = [...ctx.loader.internal!.loadCache.keys()]
-        .find(u => typeof u === 'string' && u.includes(opts.id))
+      // loader.internal / loadCache 是 Node 内部 API，并非每个 DSH 部署都暴露
+      // （DSH 2.0.10 + Node 24 实测：cordis-plugin-loader 的 fromInternal()
+      //  认不出 loader 形状时返回 undefined，官方注释称消费者应走
+      //  "documented no-internals path"）。此处退化为不显示 entry URL，
+      //  而不是整个 dev_plugin_status 抛 TypeError。
+      const lc = ctx.loader.internal?.loadCache as Map<string, unknown> | undefined
+      const entryUrl = lc instanceof Map
+        ? [...lc.keys()].find(u => typeof u === 'string' && u.includes(opts.id))
+        : undefined
       // 注入插件标记 [injected]（与 bundle 装配区分，避免 hash id 难认）
       const injected = injectedNames.has(opts.name) ? ' [injected]' : ''
       lines.push(`- [${state}] ${opts.id} (${opts.name})${injected}${opts.disabled ? ' [disabled]' : ''}${entryUrl ? '\n    entry: ' + entryUrl : ''}`)
@@ -2749,10 +2761,20 @@ export function apply(ctx: AppContext, config: Config): void {
   // ═══════════════════════════════════════════════════════════════════
   // A: 插件生产线——scaffold（生成）/ build（构建打包）/ release（发布）
   // ═══════════════════════════════════════════════════════════════════
-  /** DSH checkout 探测（env → 常见路径）。 */
+  /** DSH checkout 探测（env → 常见路径 → 桌面封装版自带 app 目录）。
+   *
+   * 桌面封装版（DSH Desktop）不携带 packages/ 源码树，其安装目录本身即是
+   * 一棵可用的 DSH 树（resources/app 下有 node_modules + package.json）。
+   * 把该目录作为最后兜底，让 dev_self_test / dev_build_plugin 在封装版环境
+   * 下获得一个真实锚点而不是直接失败。
+   *
+   * 注意：封装版没有 TypeScript 源码，因此"重新编译 host"仍不可行——本兜底
+   * 只解决探测环节；build.sh 的 tsc 步骤依旧需要完整 checkout。 */
   function detectCheckout(): string {
     const env = (process.env as Record<string, string | undefined>).DSH_CHECKOUT
     if (env && existsSync(join(env, 'packages'))) return env
+    // 显式指向封装版 app 目录也接受（用户可手动设 DSH_CHECKOUT 到此）
+    if (env && existsSync(join(env, 'node_modules')) && existsSync(join(env, 'package.json'))) return env
     const candidates = [
       join(homedir(), 'dsh-harness'),
       join(homedir(), 'dsh'),
@@ -2760,6 +2782,14 @@ export function apply(ctx: AppContext, config: Config): void {
     ]
     for (const c of candidates) {
       if (existsSync(join(c, 'packages'))) return c
+    }
+    // 桌面封装版兜底：常见安装位置
+    const desktopCandidates = [
+      join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DSH Desktop', 'resources', 'app'),
+      join(process.env.PROGRAMFILES ?? '', 'DSH Desktop', 'resources', 'app'),
+    ]
+    for (const c of desktopCandidates) {
+      if (c && existsSync(join(c, 'node_modules')) && existsSync(join(c, 'package.json'))) return c
     }
     return ''
   }
