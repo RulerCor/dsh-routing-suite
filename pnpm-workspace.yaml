@@ -1,0 +1,5 @@
+# git 插件被 dsh plugin add 以 git 依赖安装时，pnpm 会在仓库内跑一次 install + prepare。
+# 根包只有 peerDependencies（由 DSH 宿主提供）；autoInstallPeers 开着时 pnpm 会沿 peer 链
+# 自动补装，一路撞上未发布的 @deepseek-ai/dsh-type-meta（E404）导致安装失败。
+# 仓库已提交自包含 lib/，prepare 直接跳过，无需安装任何依赖——直接关掉。
+autoInstallPeers: false
